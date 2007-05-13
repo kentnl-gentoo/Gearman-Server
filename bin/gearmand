@@ -130,6 +130,9 @@ my ($daemonize, $nokeepalive, $notify_pid, $opt_pidfile, $accept, $wakeup,
     $wakeup_delay, $conf_host,);
 my $conf_port = 4730;
 
+# Rename binary in process list to make init scripts saner
+$0 = $_ = $0;
+
 Getopt::Long::GetOptions(
     'd|daemonize'    => \$daemonize,
     'p|port=i'       => \$conf_port,
