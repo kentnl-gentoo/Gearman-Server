@@ -1,5 +1,6 @@
 package Gearman::Server::Job;
 use strict;
+use Scalar::Util;
 use Sys::Hostname;
 
 use fields (
@@ -61,9 +62,30 @@ sub relay_to_listeners {
     }
 }
 
+sub relay_to_option_listeners {
+    my Gearman::Server::Job $self = shift;
+    my $option = $_[1];
+    foreach my Gearman::Server::Client $c (@{$self->{listeners}}) {
+        next if !$c || $c->{closed};
+        next unless $c->option($option);
+        $c->write($_[0]);
+    }
+
+}
+
 sub clear_listeners {
     my Gearman::Server::Job $self = shift;
     $self->{listeners} = [];
+}
+
+sub listeners {
+    my Gearman::Server::Job $self = shift;
+    return @{$self->{listeners}};
+}
+
+sub uniq {
+    my Gearman::Server::Job $self = shift;
+    return $self->{uniq};
 }
 
 sub note_finished {

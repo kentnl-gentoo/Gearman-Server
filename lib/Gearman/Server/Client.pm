@@ -27,6 +27,8 @@ use fields (
             'can_do',  # { $job_name => $timeout } $timeout can be undef indicating no timeout
             'can_do_list',
             'can_do_iter',
+            'fast_read',
+            'fast_buffer',
             'read_buf',
             'sleeping',   # 0/1:  they've said they're sleeping and we haven't woken them up
             'timer', # Timer for job cancellation
@@ -34,7 +36,13 @@ use fields (
             'client_id',  # opaque string, no whitespace.  workers give this so checker scripts
                           # can tell apart the same worker connected to multiple jobservers.
             'server',     # pointer up to client's server
+            'options',
+            'jobs_done_since_sleep',
             );
+
+# 60k read buffer default, similar to perlbal's backend read.
+use constant READ_SIZE => 60 * 1024;
+use constant MAX_READ_SIZE => 512 * 1024;
 
 # Class Method:
 sub new {
@@ -43,6 +51,8 @@ sub new {
     $self = fields::new($self) unless ref $self;
     $self->SUPER::new($sock);
 
+    $self->{fast_read}   = undef; # Number of bytes to read as fast as we can (don't try to process them)
+    $self->{fast_buffer} = []; # Array of buffers used during fast read operation
     $self->{read_buf}    = '';
     $self->{sleeping}    = 0;
     $self->{can_do}      = {};
@@ -51,17 +61,41 @@ sub new {
     $self->{can_do_iter} = 0;  # numeric iterator for where we start looking for jobs
     $self->{client_id}   = "-";
     $self->{server}      = $server;
+    $self->{options}     = {};
+    $self->{jobs_done_since_sleep} = 0;
 
     return $self;
+}
+
+sub option {
+    my Gearman::Server::Client $self = shift;
+    my $option = shift;
+
+    return $self->{options}->{$option};
 }
 
 sub close {
     my Gearman::Server::Client $self = shift;
 
-    while (my ($handle, $job) = each %{$self->{doing}}) {
+    my $doing = $self->{doing};
+
+    while (my ($handle, $job) = each %$doing) {
         my $msg = Gearman::Util::pack_res_command("work_fail", $handle);
         $job->relay_to_listeners($msg);
         $job->note_finished(0);
+    }
+
+    # Clear the doing list, since it may contain a set of jobs which contain
+    # references back to us.
+    %$doing = ();
+
+    # Remove self from sleepers, otherwise it will be leaked if another worker
+    # for the job never connects.
+    my $sleepers = $self->{server}{sleepers};
+    for my $job (@{ $self->{can_do_list} }) {
+        my $sleeping = $sleepers->{$job};
+        delete $sleeping->{$self};
+        delete $sleepers->{$job} unless %$sleeping;
     }
 
     $self->{server}->note_disconnected_client($self);
@@ -75,9 +109,40 @@ sub close {
 sub event_read {
     my Gearman::Server::Client $self = shift;
 
-    my $bref = $self->read(1024);
-    return $self->close unless defined $bref;
-    $self->{read_buf} .= $$bref;
+    my $read_size = $self->{fast_read} || READ_SIZE;
+    my $bref = $self->read($read_size);
+
+    # Delay close till after buffers are written on EOF. If we are unable
+    # to write 'err' or 'hup' will be thrown and we'll close faster.
+    return $self->write(sub { $self->close } ) unless defined $bref;
+
+    if ($self->{fast_read}) {
+        push @{$self->{fast_buffer}}, $$bref;
+        $self->{fast_read} -= length($$bref);
+
+        # If fast_read is still positive, then we need to read more data
+        return if ($self->{fast_read} > 0);
+
+        # Append the whole giant read buffer to our main read buffer
+        $self->{read_buf} .= join('', @{$self->{fast_buffer}});
+
+        # Reset the fast read state for next time.
+        $self->{fast_buffer} = [];
+        $self->{fast_read} = undef;
+    } else {
+        # Exact read size length likely means we have more sitting on the
+        # socket. Buffer up to half a meg in one go.
+        if (length($$bref) == READ_SIZE) {
+            my $limit = int(MAX_READ_SIZE / READ_SIZE);
+            my @crefs = ($$bref);
+            while (my $cref = $self->read(READ_SIZE)) {
+                push(@crefs, $$cref);
+                last if (length($$cref) < READ_SIZE || $limit-- < 1);
+            }
+            $bref = \join('', @crefs);
+        }
+        $self->{read_buf} .= $$bref;
+    }
 
     my $found_cmd;
     do {
@@ -87,8 +152,9 @@ sub event_read {
         if ($self->{read_buf} =~ /^\0REQ(.{8,8})/s) {
             my ($cmd, $len) = unpack("NN", $1);
             if ($blen < $len + 12) {
-                # not here yet.
-                $found_cmd = 0;
+                # Start a fast read loop to get all the data we need, less
+                # what we already have in the buffer.
+                $self->{fast_read} = $len + 12 - $blen;
                 return;
             }
 
@@ -215,6 +281,22 @@ sub CMD_work_fail {
     return 1;
 }
 
+sub CMD_work_exception {
+    my Gearman::Server::Client $self = shift;
+    my $ar = shift;
+
+    $$ar =~ s/^(.+?)\0//;
+    my $handle = $1;
+    my $job = $self->{doing}{$handle};
+
+    return $self->error_packet("not_worker") unless $job && $job->worker == $self;
+
+    my $msg = Gearman::Util::pack_res_command("work_exception", join("\0", $handle, $$ar));
+    $job->relay_to_option_listeners($msg, "exceptions");
+
+    return 1;
+}
+
 sub CMD_pre_sleep {
     my Gearman::Server::Client $self = shift;
     $self->{'sleeping'} = 1;
@@ -293,6 +375,22 @@ sub CMD_can_do_timeout {
     }
 
     $self->_setup_can_do_list;
+}
+
+sub CMD_option_req {
+    my Gearman::Server::Client $self = shift;
+    my $ar = shift;
+
+    my $success = sub {
+        return $self->res_packet("option_res", $$ar);
+    };
+
+    if ($$ar eq 'exceptions') {
+        $self->{options}->{exceptions} = 1;
+        return $success->();
+    }
+
+    return $self->error_packet("unknown_option");
 }
 
 sub CMD_set_client_id {
@@ -407,7 +505,7 @@ sub process_cmd {
         $self->$cmd_name(\$blob);
     };
     return $ret unless $@;
-    print "Error: $@\n";
+    warn "Error: $@\n";
     return $self->error_packet("server_error", $@);
 }
 
@@ -507,6 +605,99 @@ sub TXTCMD_status {
     }
 
     $self->write( ".\n" );
+}
+
+=head2 "jobs"
+
+Output format is zero or more lines of:
+
+    [Job function name]\t[Uniq (coalescing) key]\t[Worker address]\t[Number of listeners]\n
+
+Follows by a single line of:
+
+    .\n
+
+\t is a literal tab character
+\n is perl's definition of newline (literal \n on linux, something else on win32)
+
+=cut
+
+sub TXTCMD_jobs {
+    my Gearman::Server::Client $self = shift;
+
+    foreach my $job ($self->{server}->jobs) {
+        my $func = $job->func;
+        my $uniq = $job->uniq;
+        my $worker_addr = "-";
+
+        if (my $worker = $job->worker) {
+            $worker_addr = $worker->peer_addr_string;
+        }
+
+        my $listeners = $job->listeners;
+
+        $self->write("$func\t$uniq\t$worker_addr\t$listeners\n");
+    }
+
+    $self->write(".\n");
+}
+
+=head2 "clients"
+
+Output format is zero or more sections of:
+
+=over
+
+One line of:
+
+    [Client Address]\n
+
+Followed by zero or more lines of:
+
+    \t[Job Function]\t[Uniq (coalescing) key]\t[Worker Address]\n
+
+=back
+
+Follows by a single line of:
+
+    .\n
+
+\t is a literal tab character
+\n is perl's definition of newline (literal \n on linux, something else on win32)
+
+=cut
+
+sub TXTCMD_clients {
+    my Gearman::Server::Client $self = shift;
+
+    my %jobs_by_client;
+
+    foreach my $job ($self->{server}->jobs) {
+        foreach my $client ($job->listeners) {
+            my $ent = $jobs_by_client{$client} ||= [];
+            push @$ent, $job;
+        }
+    }
+
+    foreach my $client ($self->{server}->clients) {
+        my $client_addr = $client->peer_addr_string;
+        $self->write("$client_addr\n");
+        my $jobs = $jobs_by_client{$client} || [];
+
+        foreach my $job (@$jobs) {
+            my $func = $job->func;
+            my $uniq = $job->uniq;
+            my $worker_addr = "-";
+
+            if (my $worker = $job->worker) {
+                $worker_addr = $worker->peer_addr_string;
+            }
+            $self->write("\t$func\t$uniq\t$worker_addr\n");
+        }
+
+    }
+
+    $self->write(".\n");
 }
 
 sub TXTCMD_gladiator {

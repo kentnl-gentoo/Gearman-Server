@@ -1,23 +1,74 @@
 package Gearman::Server;
+
+=head1 NAME
+
+Gearman::Server - function call "router" and load balancer
+
+=head1 DESCRIPTION
+
+You run a Gearman server (or more likely, many of them for both
+high-availability and load balancing), then have workers (using
+L<Gearman::Worker> from the Gearman module, or libraries for other
+languages) register their ability to do certain functions to all of
+them, and then clients (using L<Gearman::Client>,
+L<Gearman::Client::Async>, etc) request work to be done from one of
+the Gearman servers.
+
+The servers connect them, routing function call requests to the
+appropriate workers, multiplexing responses to duplicate requests as
+requested, etc.
+
+More than likely, you want to use the provided L<gearmand> wrapper
+script, and not use Gearman::Server directly.
+
+=cut
+
 use strict;
 use Gearman::Server::Client;
+use Gearman::Server::Listener;
 use Gearman::Server::Job;
-use Socket qw(IPPROTO_TCP TCP_NODELAY SOL_SOCKET SOCK_STREAM AF_UNIX SOCK_STREAM PF_UNSPEC);
+use Socket qw(IPPROTO_TCP SOL_SOCKET SOCK_STREAM AF_UNIX SOCK_STREAM PF_UNSPEC);
 use Carp qw(croak);
 use Sys::Hostname ();
+use IO::Handle ();
 
 use fields (
             'client_map',    # fd -> Client
             'sleepers',      # func -> { "Client=HASH(0xdeadbeef)" => Client }
+            'sleepers_list', # func -> [ Client, ... ], ...
             'job_queue',     # job_name -> [Job, Job*]  (key only exists if non-empty)
             'job_of_handle', # handle -> Job
             'max_queue',     # func -> configured max jobqueue size
             'job_of_uniq',   # func -> uniq -> Job
             'handle_ct',     # atomic counter
             'handle_base',   # atomic counter
+            'listeners',     # arrayref of listener objects
+            'wakeup',        # number of workers to wake
+            'wakeup_delay',  # seconds to wait before waking more workers
+            'wakeup_timers', # func -> timer, timer to be canceled or adjusted when job grab/inject is called
             );
 
-our $VERSION = "1.09";
+our $VERSION = "1.10";
+
+=head1 METHODS
+
+=head2 new
+
+  $server_object = Gearman::Server->new( %options )
+
+Creates and returns a new Gearman::Server object, which attaches itself to the Danga::Socket event loop. The server will begin operating when the Danga::Socket runloop is started. This means you need to start up the runloop before anything will happen.
+
+Options:
+
+=over
+
+=item port
+
+Specify a port which you would like the Gearman::Server to listen on for TCP connections (not necessary, but useful)
+
+=back
+
+=cut
 
 sub new {
     my ($class, %opts) = @_;
@@ -25,15 +76,37 @@ sub new {
 
     $self->{client_map}    = {};
     $self->{sleepers}      = {};
+    $self->{sleepers_list} = {};
     $self->{job_queue}     = {};
     $self->{job_of_handle} = {};
     $self->{max_queue}     = {};
     $self->{job_of_uniq}   = {};
+    $self->{listeners}     = [];
+    $self->{wakeup}        = 3;
+    $self->{wakeup_delay}  = .1;
+    $self->{wakeup_timers} = {};
 
     $self->{handle_ct} = 0;
     $self->{handle_base} = "H:" . Sys::Hostname::hostname() . ":";
 
     my $port = delete $opts{port};
+
+    my $wakeup = delete $opts{wakeup};
+
+    if (defined $wakeup) {
+        die "Invalid value passed in wakeup option"
+            if $wakeup < 0 && $wakeup != -1;
+        $self->{wakeup} = $wakeup;
+    }
+
+    my $wakeup_delay = delete $opts{wakeup_delay};
+
+    if (defined $wakeup_delay) {
+        die "Invalid value passed in wakeup_delay option"
+            if $wakeup_delay < 0 && $wakeup_delay != -1;
+        $self->{wakeup_delay} = $wakeup_delay;
+    }
+
     croak("Unknown options") if %opts;
     $self->create_listening_sock($port);
 
@@ -45,36 +118,34 @@ sub debug {
     #warn "$msg\n";
 }
 
+=head2 create_listening_sock
+
+  $server_object->create_listening_sock( $portnum )
+
+Add a TCP port listener for incoming Gearman worker and client connections.
+
+=cut
+
 sub create_listening_sock {
-    my ($self, $portnum) = @_;
+    my ($self, $portnum, %opts) = @_;
+
+    my $accept_per_loop = delete $opts{accept_per_loop};
+
+    warn "Extra options passed into create_listening_sock: " . join(', ', keys %opts) . "\n"
+        if keys %opts;
+
     my $ssock = IO::Socket::INET->new(LocalPort => $portnum,
                                       Type      => SOCK_STREAM,
                                       Proto     => IPPROTO_TCP,
                                       Blocking  => 0,
                                       Reuse     => 1,
-                                      Listen    => 10 )
+                                      Listen    => 1024 )
         or die "Error creating socket: $@\n";
 
-    $self->setup_listening_sock($ssock);
+    my $listeners = $self->{listeners};
+    push @$listeners, Gearman::Server::Listener->new($ssock, $self, accept_per_loop => $accept_per_loop);
+
     return $ssock;
-}
-
-sub setup_listening_sock {
-    my ($self, $ssock) = @_;
-
-    # make sure provided listening socket is non-blocking
-    IO::Handle::blocking($ssock, 0);
-    Danga::Socket->AddOtherFds(fileno($ssock) => sub {
-        my $csock = $ssock->accept
-            or return;
-
-        $self->debug(sprintf("Listen child making a Client for %d.", fileno($csock)));
-
-        IO::Handle::blocking($csock, 0);
-        setsockopt($csock, IPPROTO_TCP, TCP_NODELAY, pack("l", 1)) or die;
-
-        $self->new_client($csock);
-    });
 }
 
 sub new_client {
@@ -107,6 +178,9 @@ sub to_inprocess_server {
     $csock->autoflush(1);
     $psock->autoflush(1);
 
+    IO::Handle::blocking($csock, 0);
+    IO::Handle::blocking($psock, 0);
+
     my $client = Gearman::Server::Client->new($csock, $self);
 
     my ($package, $file, $line) = caller;
@@ -116,6 +190,16 @@ sub to_inprocess_server {
 
     return $psock;
 }
+
+=head2 start_worker
+
+  $pid = $server_object->start_worker( $prog )
+
+  ($pid, $client) = $server_object->start_worker( $prog )
+
+Fork and start a worker process named by C<$prog> and returns the pid (or pid and client object).
+
+=cut
 
 sub start_worker {
     my ($self, $prog) = @_;
@@ -149,6 +233,8 @@ sub start_worker {
     }
 
     close($psock);
+
+    IO::Handle::blocking($csock, 0);
     my $sock = $csock;
 
     my $client = Gearman::Server::Client->new($sock, $self);
@@ -184,21 +270,56 @@ sub enqueue_job {
 
 sub wake_up_sleepers {
     my ($self, $func) = @_;
-    my $sleepmap = $self->{sleepers}{$func} or return;
 
-    foreach my $addr (keys %$sleepmap) {
-        my Gearman::Server::Client $c = $sleepmap->{$addr};
+    if (my $existing_timer = delete($self->{wakeup_timers}->{$func})) {
+        $existing_timer->cancel();
+    }
+
+    return unless $self->_wake_up_some($func);
+
+    my $delay = $self->{wakeup_delay};
+
+    # -1 means don't setup a timer. 0 actually means go as fast as we can, cooperatively.
+    return if $delay == -1;
+
+    # If we're only going to wakeup 0 workers anyways, don't set up a timer.
+    return if $self->{wakeup} == 0;
+
+    my $timer = Danga::Socket->AddTimer($delay, sub { $self->wake_up_sleepers($func) });
+    $self->{wakeup_timers}->{$func} = $timer;
+}
+
+# Returns true when there are still more workers to wake up
+# False if there are no sleepers
+sub _wake_up_some {
+    my ($self, $func) = @_;
+    my $sleepmap = $self->{sleepers}{$func} or return;
+    my $sleeporder = $self->{sleepers_list}{$func} or return;
+
+    # TODO SYNC UP STATE HERE IN CASE TWO LISTS END UP OUT OF SYNC
+
+    my $max = $self->{wakeup};
+
+    while (@$sleeporder) {
+        my Gearman::Server::Client $c = shift @$sleeporder;
         next if $c->{closed} || ! $c->{sleeping};
+        if ($max-- <= 0) {
+            unshift @$sleeporder, $c;
+            return 1;
+        }
+        delete $sleepmap->{"$c"};
         $c->res_packet("noop");
         $c->{sleeping} = 0;
     }
 
     delete $self->{sleepers}{$func};
+    delete $self->{sleepers_list}{$func};
     return;
 }
 
 sub on_client_sleep {
-    my ($self, $cl) = @_;
+    my $self = shift;
+    my Gearman::Server::Client $cl = shift;
 
     foreach my $cd (@{$cl->{can_do_list}}) {
         # immediately wake the sleeper up if there are things to be done
@@ -209,7 +330,24 @@ sub on_client_sleep {
         }
 
         my $sleepmap = ($self->{sleepers}{$cd} ||= {});
-        $sleepmap->{"$cl"} ||= $cl;
+        my $count = $sleepmap->{"$cl"}++;
+
+        next if $count >= 2;
+
+        my $sleeporder = ($self->{sleepers_list}{$cd} ||= []);
+
+        # The idea here is to keep workers at the head of the list if they are doing work, hopefully
+        # this will allow extra workers that aren't needed to actually go 'idle' safely.
+        my $jobs_done = $cl->{jobs_done_since_sleep};
+
+        if ($jobs_done) {
+            unshift @$sleeporder, $cl;
+        } else {
+            push @$sleeporder, $cl;
+        }
+
+        $cl->{jobs_done_since_sleep} = 0;
+
     }
 }
 
@@ -231,6 +369,10 @@ sub job_by_handle {
 sub note_job_finished {
     my Gearman::Server $self = shift;
     my Gearman::Server::Job $job = shift;
+
+    if (my Gearman::Server::Client $worker = $job->worker) {
+        $worker->{jobs_done_since_sleep}++;
+    }
 
     if (length($job->{uniq})) {
         delete $self->{job_of_uniq}{$job->{func}}{$job->{uniq}};
@@ -278,7 +420,7 @@ sub grab_job {
     while (1) {
         $job = shift @{$self->{job_queue}{$func}};
         return $empty->() unless $job;
-        return $job unless $job->{require_listener};
+        return $job unless $job->require_listener;
 
         foreach my Gearman::Server::Client $c (@{$job->{listeners}}) {
             return $job if $c && ! $c->{closed};
@@ -290,27 +432,6 @@ sub grab_job {
 
 1;
 __END__
-
-=head1 NAME
-
-Gearman::Server - function call "router" and load balancer
-
-=head1 DESCRIPTION
-
-You run a Gearman server (or more likely, many of them for both
-high-availability and load balancing), then have workers (using
-L<Gearman::Worker> from the Gearman module, or libraries for other
-languages) register their ability to do certain functions to all of
-them, and then clients (using L<Gearman::Client>,
-L<Gearman::Client::Async>, etc) request work to be done from one of
-the Gearman servers.
-
-The servers connect them, routing function call requests to the
-appropriate workers, multiplexing responses to duplicate requests as
-requested, etc.
-
-More than likely, you want to use the provided L<gearmand> wrapper
-script, and not use Gearman::Server directly.
 
 =head1 SEE ALSO
 
