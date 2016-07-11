@@ -1,6 +1,9 @@
 use strict;
 use warnings;
+
+use version;
 use Test::More;
+use Test::Script;
 
 my @mn = qw/
     Gearman::Server
@@ -9,14 +12,15 @@ my @mn = qw/
     Gearman::Server::Job
     /;
 
-my $v = '1.13.001';
-
+my $v = qv("v1.130.0");
 
 foreach my $n (@mn) {
     use_ok($n);
     my $_v = eval '$' . $n . '::VERSION';
     is($_v, $v, "$n version is $v");
-} ## end foreach my $n (@mn)
+}
+
+script_compiles_ok("bin/gearmand");
 
 done_testing;
 

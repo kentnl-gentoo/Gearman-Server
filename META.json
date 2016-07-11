@@ -22,7 +22,9 @@
    "prereqs" : {
       "build" : {
          "requires" : {
-            "ExtUtils::MakeMaker" : "0"
+            "Test::More" : "0",
+            "Test::Script" : "1.12",
+            "version" : "0"
          }
       },
       "configure" : {
@@ -33,10 +35,11 @@
       "runtime" : {
          "requires" : {
             "Danga::Socket" : "1.52",
-            "Gearman::Util" : "0"
+            "Gearman::Util" : "0",
+            "version" : "0"
          }
       }
    },
    "release_status" : "stable",
-   "version" : "v1.13.001"
+   "version" : "v1.130.0"
 }

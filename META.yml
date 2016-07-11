@@ -3,7 +3,9 @@ abstract: "function call \"router\" and load balancer"
 author:
   - 'Brad Fitzpatrick (brad@danga.com), Brad Whitaker (whitaker@danga.com)'
 build_requires:
-  ExtUtils::MakeMaker: 0
+  Test::More: 0
+  Test::Script: 1.12
+  version: 0
 configure_requires:
   ExtUtils::MakeMaker: 0
 dynamic_config: 1
@@ -20,4 +22,5 @@ no_index:
 requires:
   Danga::Socket: 1.52
   Gearman::Util: 0
-version: v1.13.001
+  version: 0
+version: v1.130.0
