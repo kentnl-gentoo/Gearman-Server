@@ -1,5 +1,10 @@
 package Gearman::Server::Job;
+$Gearman::Server::Job::VERSION = "1.13.001";
+
 use strict;
+use warnings;
+
+use Gearman::Server::Client;
 use Scalar::Util;
 use Sys::Hostname;
 

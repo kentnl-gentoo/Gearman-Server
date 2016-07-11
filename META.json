@@ -4,7 +4,7 @@
       "Brad Fitzpatrick (brad@danga.com), Brad Whitaker (whitaker@danga.com)"
    ],
    "dynamic_config" : 1,
-   "generated_by" : "ExtUtils::MakeMaker version 6.76, CPAN::Meta::Converter version 2.132510",
+   "generated_by" : "ExtUtils::MakeMaker version 6.82, CPAN::Meta::Converter version 2.120351",
    "license" : [
       "unknown"
    ],
@@ -38,5 +38,5 @@
       }
    },
    "release_status" : "stable",
-   "version" : "1.12"
+   "version" : "v1.13.001"
 }
