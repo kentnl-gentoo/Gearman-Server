@@ -23,4 +23,4 @@ requires:
   Danga::Socket: 1.52
   Gearman::Util: 0
   version: 0
-version: v1.130.0
+version: v1.130.1
