@@ -1,6 +1,6 @@
 package Gearman::Server;
-use version;
-$Gearman::Server::VERSION = qv("v1.130.1");
+use version ();
+$Gearman::Server::VERSION = version->declare("1.140_001");
 
 use strict;
 use warnings;
@@ -23,7 +23,7 @@ The servers connect them, routing function call requests to the
 appropriate workers, multiplexing responses to duplicate requests as
 requested, etc.
 
-More than likely, you want to use the provided L<bin/gearmand> wrapper
+More than likely, you want to use the provided L<gearmand> wrapper
 script, and not use Gearman::Server directly.
 
 =cut
@@ -32,6 +32,8 @@ use Carp qw(croak);
 use Gearman::Server::Client;
 use Gearman::Server::Listener;
 use Gearman::Server::Job;
+use Gearman::Util;
+use IO::Socket::INET;
 use IO::Handle ();
 use Socket qw/
     IPPROTO_TCP
@@ -66,15 +68,46 @@ use fields (
 
   $server_object = Gearman::Server->new( %options )
 
-Creates and returns a new Gearman::Server object, which attaches itself to the Danga::Socket event loop. The server will begin operating when the Danga::Socket runloop is started. This means you need to start up the runloop before anything will happen.
+Creates and returns a new Gearman::Server object, which attaches itself to the
+L<Danga::Socket> event loop. The server will begin operating when the 
+L<Danga::Socket> runloop is started. This means you need to start up the 
+runloop before anything will happen.
 
 Options:
 
 =over
 
-=item port
+=item
 
-Specify a port which you would like the Gearman::Server to listen on for TCP connections (not necessary, but useful)
+port
+
+Specify a port which you would like the B<Gearman::Server> to listen on for TCP connections (not necessary, but useful)
+
+=item
+
+wakeup
+
+Number of workers to wake up per job inserted into the queue.
+
+Zero (0) is a perfectly acceptable answer, and can be used if you don't care much about job latency.
+This would bank on the base idea of a worker checking in with the server every so often.
+
+Negative One (-1) indicates that all sleeping workers should be woken up.
+
+All other negative numbers will cause the server to throw exception and not start.
+
+=item
+
+wakeup_delay
+
+Time interval before waking up more workers (the value specified by B<wakeup>) when jobs are still in
+the queue.
+
+Zero (0) means go as fast as possible, but not all at the same time. Similar to -1 on B<wakeup>, but
+is more cooperative in gearmand's multitasking model.
+
+Negative One (-1) means that this event won't happen, so only the initial workers will be woken up to
+handle jobs in the queue.
 
 =back
 
@@ -82,19 +115,22 @@ Specify a port which you would like the Gearman::Server to listen on for TCP con
 
 sub new {
     my ($class, %opts) = @_;
-    my $self = ref $class ? $class : fields::new($class);
+    my $self = ref($class) ? $class : fields::new($class);
 
-    $self->{client_map}    = {};
-    $self->{sleepers}      = {};
-    $self->{sleepers_list} = {};
-    $self->{job_queue}     = {};
-    $self->{job_of_handle} = {};
-    $self->{max_queue}     = {};
-    $self->{job_of_uniq}   = {};
-    $self->{listeners}     = [];
-    $self->{wakeup}        = 3;
-    $self->{wakeup_delay}  = .1;
-    $self->{wakeup_timers} = {};
+    $self->{$_} = {} for qw/
+        client_map
+        sleepers
+        sleepers_list
+        job_queue
+        job_of_handle
+        max_queue
+        job_of_uniq
+        wakeup_timers
+        /;
+
+    $self->{listeners}    = [];
+    $self->{wakeup}       = 3;
+    $self->{wakeup_delay} = .1;
 
     $self->{handle_ct}   = 0;
     $self->{handle_base} = "H:" . Sys::Hostname::hostname() . ":";
@@ -102,7 +138,6 @@ sub new {
     my $port = delete $opts{port};
 
     my $wakeup = delete $opts{wakeup};
-
     if (defined $wakeup) {
         die "Invalid value passed in wakeup option"
             if $wakeup < 0 && $wakeup != -1;
@@ -110,7 +145,6 @@ sub new {
     }
 
     my $wakeup_delay = delete $opts{wakeup_delay};
-
     if (defined $wakeup_delay) {
         die "Invalid value passed in wakeup_delay option"
             if $wakeup_delay < 0 && $wakeup_delay != -1;
@@ -118,6 +152,7 @@ sub new {
     }
 
     croak("Unknown options") if %opts;
+
     $self->create_listening_sock($port);
 
     return $self;
@@ -126,12 +161,10 @@ sub new {
 sub debug {
     my ($self, $msg) = @_;
 
-    #warn "$msg\n";
+    warn "$msg\n";
 }
 
-=head2 create_listening_sock
-
-  $server_object->create_listening_sock( $portnum, \%options )
+=head2 create_listening_sock($portnum, %options)
 
 Add a TCP port listener for incoming Gearman worker and client connections.  Options:
 
@@ -175,6 +208,12 @@ sub create_listening_sock {
     return $ssock;
 } ## end sub create_listening_sock
 
+=head2 new_client($sock)
+
+init new L<Gearman::Server::Client> object and add it to internal clients map
+
+=cut
+
 sub new_client {
     my ($self, $sock) = @_;
     my $client = Gearman::Server::Client->new($sock, $self);
@@ -182,19 +221,38 @@ sub new_client {
     $self->{client_map}{ $client->{fd} } = $client;
 } ## end sub new_client
 
+=head2 note_disconnected_client($client)
+
+delete the client from internal clients map
+
+B<return> deleted object
+
+=cut
+
 sub note_disconnected_client {
     my ($self, $client) = @_;
     delete $self->{client_map}{ $client->{fd} };
 }
+
+=head2 clients()
+
+B<return> internal clients map
+
+=cut
 
 sub clients {
     my $self = shift;
     return values %{ $self->{client_map} };
 }
 
-# Returns a socket that is connected to the server, we can then use this
-# socket with a Gearman::Client::Async object to run clients and servers in the
-# same thread.
+=head2 to_inprocess_server()
+
+Returns a socket that is connected to the server, we can then use this
+socket with a Gearman::Client::Async object to run clients and servers in the
+same thread.
+
+=cut
+
 sub to_inprocess_server {
     my $self = shift;
 
@@ -218,7 +276,7 @@ sub to_inprocess_server {
     return $psock;
 } ## end sub to_inprocess_server
 
-=head2 start_worker
+=head2 start_worker($prog)
 
   $pid = $server_object->start_worker( $prog )
 
@@ -255,8 +313,11 @@ sub start_worker {
             or die "Unable to dup socketpair to STDOUT: $!";
         if (UNIVERSAL::isa($prog, "CODE")) {
             $prog->();
-            exit 0;    # shouldn't get here.  subref should exec.
-        }
+
+            # shouldn't get here.  subref should exec.
+            exit 0;
+        } ## end if (UNIVERSAL::isa($prog...))
+
         exec $prog;
         die "Exec failed: $!";
     } ## end unless ($pid)
@@ -274,13 +335,18 @@ sub start_worker {
     return wantarray ? ($pid, $client) : $pid;
 } ## end sub start_worker
 
+=head2 enqueue_job()
+
+=cut
+
 sub enqueue_job {
     my ($self, $job, $highpri) = @_;
     my $jq = ($self->{job_queue}{ $job->{func} } ||= []);
 
     if (defined(my $max_queue_size = $self->{max_queue}{ $job->{func} })) {
-        $max_queue_size
-            --;    # Subtract one, because we're about to add one more below.
+
+        # Subtract one, because we're about to add one more below.
+        $max_queue_size--;
         while (@$jq > $max_queue_size) {
             my $delete_job = pop @$jq;
             my $msg        = Gearman::Util::pack_res_command("work_fail",
@@ -299,6 +365,10 @@ sub enqueue_job {
 
     $self->{job_of_handle}{ $job->{'handle'} } = $job;
 } ## end sub enqueue_job
+
+=head2 wake_up_sleepers($func)
+
+=cut
 
 sub wake_up_sleepers {
     my ($self, $func) = @_;
@@ -358,6 +428,10 @@ sub _wake_up_some {
     return;
 } ## end sub _wake_up_some
 
+=head2 on_client_sleep($client)
+
+=cut
+
 sub on_client_sleep {
     my $self = shift;
     my Gearman::Server::Client $cl = shift;
@@ -394,20 +468,36 @@ sub on_client_sleep {
     } ## end foreach my $cd (@{ $cl->{can_do_list...}})
 } ## end sub on_client_sleep
 
+=head2 jobs_outstanding()
+
+=cut
+
 sub jobs_outstanding {
     my Gearman::Server $self = shift;
     return scalar keys %{ $self->{job_queue} };
 }
+
+=head2 jobs()
+
+=cut
 
 sub jobs {
     my Gearman::Server $self = shift;
     return values %{ $self->{job_of_handle} };
 }
 
+=head2 jobs_by_handle($ahndle)
+
+=cut
+
 sub job_by_handle {
     my ($self, $handle) = @_;
     return $self->{job_of_handle}{$handle};
 }
+
+=head2 note_job_finished($job)
+
+=cut
 
 sub note_job_finished {
     my Gearman::Server $self     = shift;
@@ -423,10 +513,29 @@ sub note_job_finished {
     delete $self->{job_of_handle}{ $job->{handle} };
 } ## end sub note_job_finished
 
-# <0/undef/"" to reset.  else integer max depth.
+=head2 set_max_queue($func, $max)
+
+=over
+
+=item
+
+$func
+
+function name
+
+=item
+
+$max
+
+0/undef/"" to reset. else integer max depth.
+
+=back
+
+=cut
+
 sub set_max_queue {
     my ($self, $func, $max) = @_;
-    if (defined $max && length $max && $max >= 0) {
+    if (defined($max) && length($max) && $max > 0) {
         $self->{max_queue}{$func} = int($max);
     }
     else {
@@ -434,10 +543,18 @@ sub set_max_queue {
     }
 } ## end sub set_max_queue
 
+=head2 new_job_handle()
+
+=cut
+
 sub new_job_handle {
     my $self = shift;
     return $self->{handle_base} . (++$self->{handle_ct});
 }
+
+=head2 job_of_unique($func, $uniq)
+
+=cut
 
 sub job_of_unique {
     my ($self, $func, $uniq) = @_;
@@ -445,11 +562,19 @@ sub job_of_unique {
     return $self->{job_of_uniq}{$func}{$uniq};
 }
 
+=head2 set_unique_job($func, $uniq, $job)
+
+=cut
+
 sub set_unique_job {
     my ($self, $func, $uniq, $job) = @_;
     $self->{job_of_uniq}{$func} ||= {};
     $self->{job_of_uniq}{$func}{$uniq} = $job;
 }
+
+=head2 grab_job($func)
+
+=cut
 
 sub grab_job {
     my ($self, $func) = @_;
@@ -478,6 +603,6 @@ __END__
 
 =head1 SEE ALSO
 
-L<bin/gearmand>
+L<gearmand>
 
 =cut

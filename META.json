@@ -4,7 +4,7 @@
       "Brad Fitzpatrick (brad@danga.com), Brad Whitaker (whitaker@danga.com)"
    ],
    "dynamic_config" : 1,
-   "generated_by" : "ExtUtils::MakeMaker version 6.82, CPAN::Meta::Converter version 2.120351",
+   "generated_by" : "ExtUtils::MakeMaker version 6.82, CPAN::Meta::Converter version 2.150010",
    "license" : [
       "unknown"
    ],
@@ -22,24 +22,38 @@
    "prereqs" : {
       "build" : {
          "requires" : {
+            "File::Spec" : "0",
+            "FindBin" : "0",
+            "IO::Socket::INET" : "0",
+            "Net::EmptyPort" : "0",
+            "Proc::Guard" : "0",
+            "Socket" : "0",
+            "Sys::Hostname" : "0",
+            "Test::Exception" : "0",
             "Test::More" : "0",
             "Test::Script" : "1.12",
+            "Test::TCP" : "0",
             "version" : "0"
-         }
-      },
-      "configure" : {
-         "requires" : {
-            "ExtUtils::MakeMaker" : "0"
          }
       },
       "runtime" : {
          "requires" : {
             "Danga::Socket" : "1.52",
             "Gearman::Util" : "0",
+            "IO::Socket::INET" : "0",
+            "Sys::Hostname" : "0",
             "version" : "0"
          }
       }
    },
-   "release_status" : "stable",
-   "version" : "v1.130.1"
+   "release_status" : "testing",
+   "resources" : {
+      "repository" : {
+         "type" : "git",
+         "url" : "https://github.com/p-alik/Gearman-Server.git",
+         "web" : "https://github.com/p-alik/Gearman-Server"
+      }
+   },
+   "version" : "v1.140_1",
+   "x_serialization_backend" : "JSON::PP version 2.27400"
 }

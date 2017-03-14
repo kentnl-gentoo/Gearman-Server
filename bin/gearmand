@@ -25,7 +25,7 @@ for running under daemontools/supervise).
 
 =item --port=4730 / -p 4730
 
-Set the port number, defaults to 4730.
+Set the port number, default to 4730.
 
 =item --listen hostname / -L hostname
 
@@ -37,7 +37,7 @@ Default is
 
 Write a pidfile when starting up
 
-=item --debug=1
+=item --debug
 
 Enable debugging (currently the only debug output is when a client or worker connects).
 
@@ -115,9 +115,7 @@ use Gearman::Server;
 
 use Carp;
 use Danga::Socket 1.52;
-use Gearman::Util;
 use Getopt::Long;
-use IO::Socket::INET;
 use POSIX ();
 use Pod::Usage;
 use Scalar::Util ();
@@ -125,20 +123,17 @@ use Scalar::Util ();
 use vars qw($DEBUG);
 
 $DEBUG = 0;
+my $port = 4730;
 
-my ($daemonize, $nokeepalive, $notify_pid, $opt_pidfile, $accept, $wakeup,
-    $wakeup_delay, $conf_host,);
-my $conf_port = 4730;
-
-Getopt::Long::GetOptions(
-    'd|daemonize'    => \$daemonize,
-    'p|port=i'       => \$conf_port,
-    'listen|L=s'     => \$conf_host,
-    'debug=i'        => \$DEBUG,
-    'pidfile=s'      => \$opt_pidfile,
-    'accept=i'       => \$accept,
-    'wakeup=i'       => \$wakeup,
-    'wakeup-delay=f' => \$wakeup_delay,
+GetOptions(
+    'accept=i'       => \my $accept,
+    'debug'          => \$DEBUG,
+    'd|daemonize'    => \my $daemonize,
+    'listen|L=s'     => \my $listen,
+    'pidfile=s'      => \my $opt_pidfile,
+    'p|port=i'       => \$port,
+    'wakeup-delay=f' => \my $wakeup_delay,
+    'wakeup=i'       => \my $wakeup,
     'version|V'      => sub {
         print "Gearman::Server $Gearman::Server::VERSION$/";
         exit;
@@ -149,14 +144,10 @@ Getopt::Long::GetOptions(
     },
 
     # for test suite only.
-    'notifypid|n=i' => \$notify_pid,
+    'notifypid|n=i' => \my $notify_pid,
 );
 
 daemonize() if $daemonize;
-
-# true if we've closed listening socket, and we're waiting for a
-# convenient place to kill the process
-our $graceful_shutdown = 0;
 
 # handled manually
 $SIG{'PIPE'} = "IGNORE";
@@ -165,9 +156,9 @@ my $server = Gearman::Server->new(
     wakeup_delay => $wakeup_delay,
 );
 my $ssock = $server->create_listening_sock(
-    $conf_port,
+    $port,
     accept_per_loop => $accept,
-    local_addr      => $conf_host
+    local_addr      => $listen
 );
 
 if ($opt_pidfile) {
@@ -176,23 +167,8 @@ if ($opt_pidfile) {
     close $fh;
 }
 
-sub shutdown_graceful {
-    return if $graceful_shutdown;
-
-    my $ofds = Danga::Socket->OtherFds;
-    delete $ofds->{ fileno($ssock) };
-    $ssock->close;
-    $graceful_shutdown = 1;
-    shutdown_if_calm();
-} ## end sub shutdown_graceful
-
-sub shutdown_if_calm {
-    exit 0 unless $server->jobs_outstanding;
-}
-
 sub daemonize {
-    my ($pid, $sess_id, $i);
-
+    my ($pid, $sess_id);
     ## Fork and exit parent
     if ($pid = fork) { exit 0; }
 
@@ -205,27 +181,22 @@ sub daemonize {
     if ($pid = fork) { exit 0; }
 
     ## Change working directory
-    chdir "/";
+    chdir("/") || croak "can't chdir to /: $!";
 
     ## Clear file creation mask
     umask 0;
 
     ## Close open file descriptors
-    close(STDIN);
-    close(STDOUT);
-    close(STDERR);
+    close(STDIN)  || croak "can't close STDIN: $!";
+    close(STDOUT) || croak "can't close STDOUT: $!";
+    close(STDERR) || croak "can't close STDERR: $!";
 
     ## Reopen stderr, stdout, stdin to /dev/null
-    open(STDIN,  "+>/dev/null");
-    open(STDOUT, "+>&STDIN");
-    open(STDERR, "+>&STDIN");
+    open(STDIN,  "+>/dev/null") || croak "can't write to /dev/null: $!";
+    open(STDOUT, "+>&STDIN")    || croak "can't dup STDOUT to STDIN: $!";
+    open(STDERR, "+>&STDIN")    || croak "can't dup STDERR to STDIN: $!";
 } ## end sub daemonize
 
 kill 'USR1', $notify_pid if $notify_pid;
 Danga::Socket->EventLoop();
 
-# Local Variables:
-# mode: perl
-# c-basic-indent: 4
-# indent-tabs-mode: nil
-# End:

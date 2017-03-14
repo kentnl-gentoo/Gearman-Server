@@ -1,26 +1,38 @@
 ---
-abstract: "function call \"router\" and load balancer"
+abstract: 'function call "router" and load balancer'
 author:
   - 'Brad Fitzpatrick (brad@danga.com), Brad Whitaker (whitaker@danga.com)'
 build_requires:
-  Test::More: 0
-  Test::Script: 1.12
-  version: 0
-configure_requires:
-  ExtUtils::MakeMaker: 0
+  File::Spec: '0'
+  FindBin: '0'
+  IO::Socket::INET: '0'
+  Net::EmptyPort: '0'
+  Proc::Guard: '0'
+  Socket: '0'
+  Sys::Hostname: '0'
+  Test::Exception: '0'
+  Test::More: '0'
+  Test::Script: '1.12'
+  Test::TCP: '0'
+  version: '0'
 dynamic_config: 1
-generated_by: 'ExtUtils::MakeMaker version 6.82, CPAN::Meta::Converter version 2.120351'
+generated_by: 'ExtUtils::MakeMaker version 6.82, CPAN::Meta::Converter version 2.150010'
 license: unknown
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.4.html
-  version: 1.4
+  version: '1.4'
 name: Gearman-Server
 no_index:
   directory:
     - t
     - inc
 requires:
-  Danga::Socket: 1.52
-  Gearman::Util: 0
-  version: 0
-version: v1.130.1
+  Danga::Socket: '1.52'
+  Gearman::Util: '0'
+  IO::Socket::INET: '0'
+  Sys::Hostname: '0'
+  version: '0'
+resources:
+  repository: https://github.com/p-alik/Gearman-Server.git
+version: v1.140_1
+x_serialization_backend: 'CPAN::Meta::YAML version 0.018'

@@ -1,15 +1,15 @@
 package Gearman::Server::Client;
-use version;
-$Gearman::Server::Client::VERSION = qv("v1.130.1");
+use version ();
+$Gearman::Server::Client::VERSION = version->declare("1.140_001");
 
 use strict;
 use warnings;
 
 =head1 NAME
 
-Gearman::Server::Client - client for gearmand
+Gearman::Server::Client - client for L<gearmand> based on L<Gearman::Server>
 
-=head1 NAME
+=head1 DESCRIPTION
 
 Used by L<Gearman::Server> to instantiate connections from clients.
 Clients speak either a binary protocol, for normal operation (calling
@@ -23,8 +23,11 @@ and L<Gearman::Client::Async>, if that's any consolation.
 
 The line-based administrative commands are documented below.
 
+=head1 METHODS
+
 =cut
 
+use Gearman::Util;
 use Danga::Socket;
 use base 'Danga::Socket';
 use fields (
@@ -90,12 +93,20 @@ sub new {
     return $self;
 } ## end sub new
 
+=head2 option($option)
+
+=cut
+
 sub option {
     my Gearman::Server::Client $self = shift;
     my $option = shift;
 
     return $self->{options}->{$option};
 } ## end sub option
+
+=head2 close()
+
+=cut
 
 sub close {
     my Gearman::Server::Client $self = shift;
@@ -142,7 +153,12 @@ sub close {
     $self->SUPER::close;
 } ## end sub close
 
-# Client
+=head2 event_read()
+
+read from socket
+
+=cut
+
 sub event_read {
     my Gearman::Server::Client $self = shift;
 
@@ -215,13 +231,22 @@ sub event_read {
     } while ($found_cmd);
 } ## end sub event_read
 
+=head2 event_write()
+
+=cut
+
 sub event_write {
     my $self = shift;
     my $done = $self->write(undef);
     $self->watch_write(0) if $done;
 }
 
-# Line based command processor
+=head2 process_line($line)
+
+Line based command processor
+
+=cut
+
 sub process_line {
     my Gearman::Server::Client $self = shift;
     my $line = shift;
@@ -562,11 +587,15 @@ sub event_hup { my $self = shift; $self->close; }
 
 =head1 Line based commands
 
-These commands are used for administrative or statistic tasks to be done on the gearman server. They can be entered using a line based client (telnet, etc.) by connecting to the listening port (7003) and are also intended to be machine parsable.
+These commands are used for administrative or statistic tasks to be done on the
+gearman server. They can be entered using a line based client (telnet, etc.) by
+connecting to the listening port (4730) and are also intended to be machine
+parsable.
 
 =head2 "workers"
 
-Emits list of registered workers, their fds, IPs, client ids, and list of registered abilities (function names they can do).  Of format:
+Emits list of registered workers, their fds, IPs, client ids, and list of
+registered abilities (function names they can do).  Of format:
 
   fd ip.x.y.z client_id : func_a func_b func_c
   fd ip.x.y.z client_id : func_a func_b func_c
@@ -592,7 +621,9 @@ sub TXTCMD_workers {
 
 =head2 "status"
 
-The output format of this function is tab separated columns as follows, followed by a line consisting of a fullstop and a newline (".\n") to indicate the end of output.
+The output format of this function is tab separated columns as follows,
+followed by a line consisting of a fullstop and a newline (".\n") to indicate
+the end of output.
 
 =over
 
@@ -602,7 +633,8 @@ A string denoting the name of the function of the job
 
 =item Number in queue
 
-A positive integer indicating the total number of jobs for this function in the queue. This includes currently running ones as well (next column)
+A positive integer indicating the total number of jobs for this function in the
+queue. This includes currently running ones as well (next column)
 
 =item Number of jobs running
 
@@ -610,7 +642,9 @@ A positive integer showing how many jobs of this function are currently running
 
 =item Number of capable workers
 
-A positive integer denoting the maximum possible count of workers that could be doing this job. Though they may not all be working on it due to other tasks holding them busy.
+A positive integer denoting the maximum possible count of workers that could be
+doing this job. Though they may not all be working on it due to other tasks
+holding them busy.
 
 =back
 
@@ -773,11 +807,14 @@ sub TXTCMD_gladiator {
 
 =head2 "maxqueue" function [max_queue_size]
 
-For a given function of job, the maximum queue size is adjusted to be max_queue_size jobs long. A negative value indicates unlimited queue size.
+For a given function of job, the maximum queue size is adjusted to be
+max_queue_size jobs long. A negative value indicates unlimited queue size.
 
-If the max_queue_size value is not supplied then it is unset (and the default maximum queue size will apply to this function).
+If the max_queue_size value is not supplied then it is unset (and the default
+maximum queue size will apply to this function).
 
-This function will return OK upon success, and will return ERR incomplete_args upon an invalid number of arguments.
+This function will return OK upon success, and will return ERR incomplete_args
+upon an invalid number of arguments.
 
 =cut
 
@@ -794,28 +831,6 @@ sub TXTCMD_maxqueue {
     $self->write("OK\n");
 } ## end sub TXTCMD_maxqueue
 
-=head2 "shutdown" ["graceful"]
-
-Close the server.  Or "shutdown graceful" to close the listening socket, then close the server when traffic has died away.
-
-=cut
-
-sub TXTCMD_shutdown {
-    my Gearman::Server::Client $self = shift;
-    my $args = shift;
-    if ($args eq "graceful") {
-        $self->write("OK\n");
-        Gearmand::shutdown_graceful();
-    }
-    elsif (!$args) {
-        $self->write("OK\n");
-        exit 0;
-    }
-    else {
-        $self->err_line('unknown_args');
-    }
-} ## end sub TXTCMD_shutdown
-
 =head2 "version"
 
 Returns server version.
@@ -830,20 +845,26 @@ sub TXTCMD_version {
 sub err_line {
     my Gearman::Server::Client $self = shift;
     my $err_code                     = shift;
-    my $err_text                     = {
-        'unknown_command# numeric iterator for where we start looking for jobl'
-            => "Unknown server command",
-        'unknown_args' => "Unknown arguments to server command",
-        'incomplete_args' =>
-            "An incomplete set of arguments was sent to this command",
-    }->{$err_code};
+    my %err_text                     = (
 
-    $self->write("ERR $err_code " . eurl($err_text) . "\r\n");
+        # numeric iterator for where we start looking for jobl
+        unknown_command => "Unknown server command",
+        unknown_args    => "Unknown arguments to server command",
+        incomplete_args =>
+            "An incomplete set of arguments was sent to this command",
+    );
+
+    $self->write(
+        join '',
+        "ERR $err_code ",
+        eurl($err_text{$err_code}) || '', "\r\n"
+    );
     return 0;
 } ## end sub err_line
 
 sub eurl {
     my $a = $_[0];
+    $a || return;
     $a =~ s/([^a-zA-Z0-9_\,\-.\/\\\: ])/uc sprintf("%%%02x",ord($1))/eg;
     $a =~ tr/ /+/;
     return $a;
